@@ -205,4 +205,124 @@ def parse_listing(html: str, url: str, max_images: int = 3) -> Dict[str, Any]:
 # ---------------------------
 # PowerPoint
 # ---------------------------
-def add_titlebox(slide, left, top, width, height, text, font_size=28, bold=T
+def add_titlebox(slide, left, top, width, height, text, font_size=28, bold=True):
+    tb = slide.shapes.add_textbox(left, top, width, height)
+    p = tb.text_frame
+    p.clear()
+    run = p.paragraphs[0].add_run()
+    run.text = text
+    run.font.size = Pt(font_size)
+    run.font.bold = bold
+    p.paragraphs[0].alignment = PP_ALIGN.LEFT
+    return tb
+
+def add_textbox(slide, left, top, width, height, text, font_size=14):
+    tb = slide.shapes.add_textbox(left, top, width, height)
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.clear()
+    run = tf.paragraphs[0].add_run()
+    run.text = text
+    run.font.size = Pt(font_size)
+    tf.paragraphs[0].alignment = PP_ALIGN.LEFT
+    return tb
+
+def build_pptx(df: pd.DataFrame, out_path: Path, brand: str, max_images: int = 3):
+    prs = Presentation()
+    # Capa
+    cover = prs.slides.add_slide(prs.slide_layouts[5])
+    add_titlebox(cover, Inches(0.8), Inches(1.0), Inches(9), Inches(1.2),
+                 "Portfólio de Imóveis", 36, True)
+    add_textbox(cover, Inches(0.8), Inches(2.2), Inches(9), Inches(0.6),
+                brand, 16)
+
+    # Slides por imóvel
+    for _, r in df.iterrows():
+        s = prs.slides.add_slide(prs.slide_layouts[5])
+        title_line = f"{(r.get('title') or '').strip()} — {(r.get('location') or '').strip()}"
+        price_line = (r.get('price') or '').strip()
+
+        add_titlebox(s, Inches(0.6), Inches(0.5), Inches(8.8), Inches(0.7), title_line, 24, True)
+        add_textbox(s, Inches(0.6), Inches(1.2), Inches(8.8), Inches(0.4), price_line, 18)
+
+        # Dados principais
+        specs = []
+        if r.get("typology"): specs.append(f"Tipologia: {r['typology']}")
+        if r.get("area"): specs.append(f"Área: {r['area']}")
+        if r.get("bedrooms"): specs.append(f"Quartos: {r['bedrooms']}")
+        if r.get("bathrooms"): specs.append(f"WCs: {r['bathrooms']}")
+        specs.append(f"Link: {r.get('url','')}")
+        add_textbox(s, Inches(0.6), Inches(1.8), Inches(5.5), Inches(1.0), "  •  ".join(specs), 12)
+
+        # Descrição
+        descr = (r.get("description") or "")[:900]
+        add_textbox(s, Inches(0.6), Inches(2.7), Inches(5.5), Inches(3.5), descr, 12)
+
+        # Imagens (até max_images)
+        col = 0
+        for i in range(1, max_images+1):
+            key = f"image{i}"
+            if not r.get(key):
+                continue
+            try:
+                img_bytes = requests.get(r[key], timeout=12).content
+                s.shapes.add_picture(io.BytesIO(img_bytes), Inches(6.3), Inches(1.8 + col*2.0), width=Inches(3.0))
+                col += 1
+            except Exception:
+                pass
+
+    prs.save(out_path)
+
+# ---------------------------
+# Main
+# ---------------------------
+async def run(args):
+    df_urls = pd.read_csv(args.input)
+    rows = []
+    for _, row in df_urls.iterrows():
+        url = str(row["url"]).strip()
+        if not url or not url.startswith("http"):
+            continue
+        try:
+            html = await fetch_html(url, render=args.render)
+            rec = parse_listing(html, url, max_images=args.max_images)
+            rows.append(rec)
+            print(f"[OK] {url} → {rec.get('title','(sem título)')[:80]}")
+        except Exception as e:
+            print(f"[ERRO] {url}: {e}")
+        time.sleep(args.delay)
+
+    if not rows:
+        print("Nenhum registo extraído.")
+        return
+
+    # Normalizar colunas de imagens
+    max_imgs = max([len([k for k in r.keys() if k.startswith("image")]) for r in rows])
+    for r in rows:
+        for i in range(1, max_imgs+1):
+            r.setdefault(f"image{i}", "")
+
+    out_csv = Path(args.output)
+    pd.DataFrame(rows).to_csv(out_csv, index=False, quoting=csv.QUOTE_NONNUMERIC)
+
+    out_pptx = Path(args.pptx)
+    build_pptx(pd.DataFrame(rows), out_pptx, brand=args.brand, max_images=args.max_images)
+
+    print(f"Feito! CSV: {out_csv.resolve()} | PPTX: {out_pptx.resolve()}")
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Extrai dados do Imovirtual → CSV + PPTX")
+    p.add_argument("--input", required=True, help="CSV com coluna 'url'")
+    p.add_argument("--output", default="dados.csv", help="CSV de saída com dados")
+    p.add_argument("--pptx", default="Apresentacoes_Imoveis.pptx", help="Nome do PowerPoint de saída")
+    p.add_argument("--brand", default="Hugo Silva | RE/MAX Oceanus — Choose your dream. Live in it.",
+                   help="Assinatura/copy para a apresentação")
+    p.add_argument("--delay", type=float, default=2.0, help="Pausa (segundos) entre URLs")
+    p.add_argument("--render", choices=["load", "domcontentloaded", "networkidle"],
+                   default="networkidle", help="Playwright wait_until")
+    p.add_argument("--max-images", type=int, default=3, help="Máximo de imagens por imóvel")
+    return p.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    asyncio.run(run(args))
